@@ -1,0 +1,8 @@
+{
+  "name": "ipgm-hub-sync",
+  "version": "2.0.0",
+  "type": "module",
+  "description": "iPGM Hub & Spoke portfolio tracker — syncs all program repos into GitHub Projects V2",
+  "scripts": { "sync": "node sync.js" },
+  "engines": { "node": ">=18.0.0" }
+}
