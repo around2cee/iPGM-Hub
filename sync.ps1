@@ -430,7 +430,8 @@ mutation AddDraft(`$projectId: ID!, `$title: String!, `$body: String!) {
     Set-FieldValue $projectId $itemId $fieldMap["Language"]   $lang
     Set-FieldValue $projectId $itemId $fieldMap["Repo URL"]   $repo.url
     Set-FieldValue $projectId $itemId $fieldMap["Stars"]      $repo.stargazerCount
-    Set-FieldValue $projectId $itemId $fieldMap["Visibility"] (if ($repo.isPrivate) { "Private" } else { "Public" })
+    $visibility = if ($repo.isPrivate) { "Private" } else { "Public" }
+    Set-FieldValue $projectId $itemId $fieldMap["Visibility"] $visibility
 
     # Manual fields - set defaults on new items only
     if ($isNew) {
