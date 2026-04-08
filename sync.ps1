@@ -14,6 +14,11 @@ $LABEL_NAME    = "portfolio-report"
 $LABEL_COLOR   = "0075ca"
 $LABEL_DESC    = "Surface this issue in the iPGM portfolio board"
 
+# Fix SSL/TLS for corporate proxy environments (Citrix)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# If still failing, uncomment:
+# [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+
 if (-not $TOKEN -or -not $OWNER) {
     Write-Error "ERROR: ORG_PORTFOLIO_TOKEN and ORG_NAME must be set."
     exit 1
