@@ -13,6 +13,16 @@ $SOURCE_OWNER  = "around2cee"
 $DEST_OWNER    = "csantos"
 $API           = "https://api.github.com"
 
+# ---------------------------------------------------------------------------
+# Fix SSL/TLS for corporate proxy environments (Citrix)
+# Forces TLS 1.2 and trusts the corporate certificate chain
+# ---------------------------------------------------------------------------
+
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# If your company uses SSL inspection, uncomment the line below:
+# [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+
 $REPOS = @(
     "iPGM-Hub",
     "iPGM-Program-Alpha",
