@@ -2,30 +2,29 @@
  * iPGM-hub/sync.js
  *
  * Hub & Spoke portfolio sync for the iPGM framework.
- * Syncs all org repos into an org-level GitHub Projects V2 board with
- * iPGM-specific fields: Phase, PEI Level, Program Manager, Status.
- * Also surfaces any issue labelled `portfolio-report` as a linked item.
+ * Works with both personal GitHub accounts AND GitHub orgs.
+ * Auto-detects account type on startup.
  *
  * Requirements:
- *   - Node >= 18 (native fetch)
+ *   - Node >= 18 (native fetch, no external dependencies)
  *   - Env: ORG_PORTFOLIO_TOKEN  (classic PAT: repo, read:org, project, workflow)
- *   - Env: ORG_NAME             (e.g. Chas-Test-Org)
+ *   - Env: ORG_NAME             (GitHub username OR org name)
  */
 
-const TOKEN   = process.env.ORG_PORTFOLIO_TOKEN;
-const ORG     = process.env.ORG_NAME;
-const PROJECT_TITLE     = 'iPGM Program Portfolio';
-const LABEL_NAME        = 'portfolio-report';
-const LABEL_COLOR       = '0075ca';
-const LABEL_DESCRIPTION = 'Surface this issue in the iPGM portfolio board';
+const TOKEN         = process.env.ORG_PORTFOLIO_TOKEN;
+const OWNER         = process.env.ORG_NAME;
+const PROJECT_TITLE = 'iPGM Program Portfolio';
+const LABEL_NAME    = 'portfolio-report';
+const LABEL_COLOR   = '0075ca';
+const LABEL_DESC    = 'Surface this issue in the iPGM portfolio board';
 
-if (!TOKEN || !ORG) {
+if (!TOKEN || !OWNER) {
   console.error('ERROR: ORG_PORTFOLIO_TOKEN and ORG_NAME must be set.');
   process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
-// GraphQL HTTP helper
+// GraphQL helper
 // ---------------------------------------------------------------------------
 
 async function graphql(query, variables = {}) {
@@ -34,7 +33,7 @@ async function graphql(query, variables = {}) {
     headers: {
       Authorization: `Bearer ${TOKEN}`,
       'Content-Type': 'application/json',
-      'User-Agent': 'ipgm-hub-sync/2.0',
+      'User-Agent':   'ipgm-hub-sync/2.0',
     },
     body: JSON.stringify({ query, variables }),
   });
@@ -47,27 +46,46 @@ async function graphql(query, variables = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Queries
+// Auto-detect: personal account or org
+// Returns { id, isOrg }
 // ---------------------------------------------------------------------------
 
-async function getOrgId(org) {
+async function getOwnerInfo(owner) {
   const data = await graphql(`
-    query GetOrgId($org: String!) {
-      organization(login: $org) { id }
+    query GetOwner($owner: String!) {
+      repositoryOwner(login: $owner) {
+        id
+        __typename
+      }
     }
-  `, { org });
-  return data.organization.id;
+  `, { owner });
+
+  const node = data.repositoryOwner;
+  if (!node) throw new Error(`Cannot find GitHub account: "${owner}". Check ORG_NAME.`);
+
+  return {
+    id:    node.id,
+    isOrg: node.__typename === 'Organization',
+  };
 }
 
-async function getAllRepos(org) {
+// ---------------------------------------------------------------------------
+// List all repos (works for both users and orgs via repositoryOwner)
+// ---------------------------------------------------------------------------
+
+async function getAllRepos(owner) {
   const repos = [];
-  let cursor = null;
+  let cursor  = null;
 
   do {
     const data = await graphql(`
-      query ListOrgRepos($org: String!, $cursor: String) {
-        organization(login: $org) {
-          repositories(first: 100, after: $cursor, orderBy: { field: NAME, direction: ASC }) {
+      query ListRepos($owner: String!, $cursor: String) {
+        repositoryOwner(login: $owner) {
+          repositories(
+            first: 100
+            after: $cursor
+            orderBy: { field: NAME, direction: ASC }
+          ) {
             pageInfo { hasNextPage endCursor }
             nodes {
               id
@@ -81,9 +99,9 @@ async function getAllRepos(org) {
           }
         }
       }
-    `, { org, cursor });
+    `, { owner, cursor });
 
-    const page = data.organization.repositories;
+    const page = data.repositoryOwner.repositories;
     repos.push(...page.nodes);
     cursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
   } while (cursor);
@@ -91,20 +109,31 @@ async function getAllRepos(org) {
   return repos;
 }
 
-async function findOrCreateProject(org, orgId) {
-  const data = await graphql(`
-    query FindProject($org: String!) {
-      organization(login: $org) {
-        projectsV2(first: 20) {
-          nodes { id title }
-        }
-      }
-    }
-  `, { org });
+// ---------------------------------------------------------------------------
+// Find or create the iPGM portfolio project
+// Works for both orgs and personal accounts
+// ---------------------------------------------------------------------------
 
-  const existing = data.organization.projectsV2.nodes.find(
-    p => p.title === PROJECT_TITLE
-  );
+async function findOrCreateProject(owner, ownerId, isOrg) {
+  // Query differs: orgs use organization(), users use user()
+  const findQuery = isOrg
+    ? `query FindProject($owner: String!) {
+         organization(login: $owner) {
+           projectsV2(first: 20) { nodes { id title } }
+         }
+       }`
+    : `query FindProject($owner: String!) {
+         user(login: $owner) {
+           projectsV2(first: 20) { nodes { id title } }
+         }
+       }`;
+
+  const findData = await graphql(findQuery, { owner });
+  const projects = isOrg
+    ? findData.organization.projectsV2.nodes
+    : findData.user.projectsV2.nodes;
+
+  const existing = projects.find(p => p.title === PROJECT_TITLE);
   if (existing) {
     console.log(`  Found existing project: "${PROJECT_TITLE}" (${existing.id})`);
     return existing.id;
@@ -116,12 +145,16 @@ async function findOrCreateProject(org, orgId) {
         projectV2 { id title }
       }
     }
-  `, { ownerId: orgId, title: PROJECT_TITLE });
+  `, { ownerId, title: PROJECT_TITLE });
 
   const projectId = created.createProjectV2.projectV2.id;
   console.log(`  Created project: "${PROJECT_TITLE}" (${projectId})`);
   return projectId;
 }
+
+// ---------------------------------------------------------------------------
+// Ensure custom iPGM fields exist on the board
+// ---------------------------------------------------------------------------
 
 async function getProjectFields(projectId) {
   const data = await graphql(`
@@ -146,16 +179,6 @@ async function getProjectFields(projectId) {
 
   return data.node.fields.nodes;
 }
-
-// ---------------------------------------------------------------------------
-// iPGM Field Definitions
-//
-// Manual fields (set on creation only — never auto-overwritten):
-//   Status, Phase, PEI Level, Program Manager
-//
-// Auto-sync fields (always updated from GitHub metadata):
-//   Language, Visibility, Stars, Repo URL
-// ---------------------------------------------------------------------------
 
 const DESIRED_FIELDS = [
   { name: 'Status', dataType: 'SINGLE_SELECT', manual: true, options: [
@@ -187,9 +210,9 @@ const DESIRED_FIELDS = [
 ];
 
 async function ensureFields(projectId) {
-  const existing = await getProjectFields(projectId);
+  const existing     = await getProjectFields(projectId);
   const existingByName = Object.fromEntries(existing.map(f => [f.name, f]));
-  const fieldMap = {};
+  const fieldMap     = {};
 
   for (const desired of DESIRED_FIELDS) {
     let field = existingByName[desired.name];
@@ -198,7 +221,7 @@ async function ensureFields(projectId) {
       const isSingleSelect = desired.dataType === 'SINGLE_SELECT';
       const variables = {
         projectId,
-        name: desired.name,
+        name:     desired.name,
         dataType: desired.dataType,
         ...(isSingleSelect && {
           options: desired.options.map(o => ({ name: o.name, color: o.color, description: '' })),
@@ -236,7 +259,11 @@ async function ensureFields(projectId) {
 
       if (needsUpdate) {
         const updated = await graphql(`
-          mutation SetSelectOptions($projectId: ID!, $fieldId: ID!, $options: [ProjectV2SingleSelectFieldOptionInput!]!) {
+          mutation SetSelectOptions(
+            $projectId: ID!
+            $fieldId: ID!
+            $options: [ProjectV2SingleSelectFieldOptionInput!]!
+          ) {
             updateProjectV2Field(input: {
               projectId: $projectId
               fieldId: $fieldId
@@ -250,11 +277,7 @@ async function ensureFields(projectId) {
         `, {
           projectId,
           fieldId: field.id,
-          options: desired.options.map(o => ({
-            name: o.name,
-            color: o.color,
-            description: '',
-          })),
+          options: desired.options.map(o => ({ name: o.name, color: o.color, description: '' })),
         });
         field = updated.updateProjectV2Field.projectV2Field;
         console.log(`  Updated options on "${desired.name}"`);
@@ -271,9 +294,13 @@ async function ensureFields(projectId) {
   return fieldMap;
 }
 
+// ---------------------------------------------------------------------------
+// Get all existing project items
+// ---------------------------------------------------------------------------
+
 async function getAllItems(projectId) {
   const itemMap = new Map();
-  let cursor = null;
+  let cursor    = null;
 
   do {
     const data = await graphql(`
@@ -307,7 +334,7 @@ async function getAllItems(projectId) {
 }
 
 // ---------------------------------------------------------------------------
-// Mutations
+// Field value setter
 // ---------------------------------------------------------------------------
 
 async function setFieldValue(projectId, itemId, field, value) {
@@ -323,18 +350,27 @@ async function setFieldValue(projectId, itemId, field, value) {
   }
 
   await graphql(`
-    mutation UpdateFieldValue($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: ProjectV2FieldValue!) {
+    mutation UpdateFieldValue(
+      $projectId: ID!
+      $itemId: ID!
+      $fieldId: ID!
+      $value: ProjectV2FieldValue!
+    ) {
       updateProjectV2ItemFieldValue(input: {
         projectId: $projectId
-        itemId: $itemId
-        fieldId: $fieldId
-        value: $value
+        itemId:    $itemId
+        fieldId:   $fieldId
+        value:     $value
       }) {
         projectV2Item { id }
       }
     }
   `, { projectId, itemId, fieldId: field.id, value: valueInput });
 }
+
+// ---------------------------------------------------------------------------
+// Upsert a repo as a board item
+// ---------------------------------------------------------------------------
 
 async function upsertRepo(projectId, fieldMap, itemMap, repo) {
   const isNew = !itemMap.has(repo.name);
@@ -343,73 +379,67 @@ async function upsertRepo(projectId, fieldMap, itemMap, repo) {
   if (isNew) {
     const result = await graphql(`
       mutation AddDraftIssue($projectId: ID!, $title: String!, $body: String!) {
-        addProjectV2DraftIssue(input: { projectId: $projectId, title: $title, body: $body }) {
+        addProjectV2DraftIssue(input: {
+          projectId: $projectId
+          title:     $title
+          body:      $body
+        }) {
           projectItem { id }
         }
       }
-    `, {
-      projectId,
-      title: repo.name,
-      body: repo.description ?? '',
-    });
+    `, { projectId, title: repo.name, body: repo.description ?? '' });
+
     itemId = result.addProjectV2DraftIssue.projectItem.id;
     itemMap.set(repo.name, itemId);
   } else {
     itemId = itemMap.get(repo.name);
   }
 
-  // Auto-sync metadata fields (always updated)
+  // Auto-sync metadata (always updated)
   await setFieldValue(projectId, itemId, fieldMap['Language'],   repo.primaryLanguage?.name ?? '');
   await setFieldValue(projectId, itemId, fieldMap['Repo URL'],   repo.url);
   await setFieldValue(projectId, itemId, fieldMap['Stars'],      repo.stargazerCount);
   await setFieldValue(projectId, itemId, fieldMap['Visibility'], repo.isPrivate ? 'Private' : 'Public');
 
-  // Manual fields — set defaults on new items only, never overwrite on existing
+  // Manual fields - defaults on first add only, never overwrite
   if (isNew) {
     await setFieldValue(projectId, itemId, fieldMap['Status'], 'Todo');
     await setFieldValue(projectId, itemId, fieldMap['Phase'],  'Initiation');
-    // PEI Level and Program Manager are left blank — PGM fills these in on the board
   }
 
   return isNew;
 }
 
 // ---------------------------------------------------------------------------
-// Label management
+// Ensure portfolio-report label exists in every repo
 // ---------------------------------------------------------------------------
 
-async function ensurePortfolioLabel(org, repos) {
+async function ensurePortfolioLabel(owner, repos) {
   for (const repo of repos) {
     const res = await fetch(
-      `https://api.github.com/repos/${org}/${repo.name}/labels`,
+      `https://api.github.com/repos/${owner}/${repo.name}/labels`,
       {
         headers: {
           Authorization: `Bearer ${TOKEN}`,
-          'User-Agent': 'ipgm-hub-sync/2.0',
-          Accept: 'application/vnd.github+json',
+          'User-Agent':  'ipgm-hub-sync/2.0',
+          Accept:        'application/vnd.github+json',
         },
       }
     );
-
     if (!res.ok) continue;
 
     const labels = await res.json();
-    const exists = labels.some(l => l.name === LABEL_NAME);
-    if (exists) continue;
+    if (labels.some(l => l.name === LABEL_NAME)) continue;
 
-    await fetch(`https://api.github.com/repos/${org}/${repo.name}/labels`, {
+    await fetch(`https://api.github.com/repos/${owner}/${repo.name}/labels`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        'User-Agent': 'ipgm-hub-sync/2.0',
-        Accept: 'application/vnd.github+json',
+        Authorization:  `Bearer ${TOKEN}`,
+        'User-Agent':   'ipgm-hub-sync/2.0',
+        Accept:         'application/vnd.github+json',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        name: LABEL_NAME,
-        color: LABEL_COLOR,
-        description: LABEL_DESCRIPTION,
-      }),
+      body: JSON.stringify({ name: LABEL_NAME, color: LABEL_COLOR, description: LABEL_DESC }),
     });
 
     console.log(`  Created label "${LABEL_NAME}" in ${repo.name}`);
@@ -417,12 +447,14 @@ async function ensurePortfolioLabel(org, repos) {
 }
 
 // ---------------------------------------------------------------------------
-// Flagged issue sync
+// Find issues labelled portfolio-report
+// Uses org: for orgs, user: for personal accounts
 // ---------------------------------------------------------------------------
 
-async function getFlaggedIssues(org) {
-  const issues = [];
-  let cursor = null;
+async function getFlaggedIssues(owner, isOrg) {
+  const issues  = [];
+  let cursor    = null;
+  const qualifier = isOrg ? `org:${owner}` : `user:${owner}`;
 
   do {
     const data = await graphql(`
@@ -441,7 +473,7 @@ async function getFlaggedIssues(org) {
         }
       }
     `, {
-      query: `org:${org} label:${LABEL_NAME} is:issue is:open`,
+      query: `${qualifier} label:${LABEL_NAME} is:issue is:open`,
       cursor,
     });
 
@@ -468,7 +500,7 @@ async function syncFlaggedIssues(projectId, itemMap, issues) {
     `, { projectId, contentId: issue.id });
 
     itemMap.set(issue.url, result.addProjectV2ItemById.item.id);
-    console.log(`  + Issue added: [${issue.repository.name}#${issue.number}] ${issue.title}`);
+    console.log(`  + Issue: [${issue.repository.name}#${issue.number}] ${issue.title}`);
     added++;
   }
 
@@ -480,38 +512,39 @@ async function syncFlaggedIssues(projectId, itemMap, issues) {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  console.log(`\niPGM Hub & Spoke Portfolio Sync\nOrg: ${ORG}\nProject: "${PROJECT_TITLE}"\n`);
+  console.log(`\niPGM Hub and Spoke Portfolio Sync\nOwner: ${OWNER}\nProject: "${PROJECT_TITLE}"\n`);
 
-  console.log('Fetching org ID...');
-  const orgId = await getOrgId(ORG);
+  console.log('Detecting account type (personal or org)...');
+  const { id: ownerId, isOrg } = await getOwnerInfo(OWNER);
+  console.log(`  Account type: ${isOrg ? 'Organization' : 'Personal account'}`);
 
   console.log('Fetching all repos...');
-  const repos = await getAllRepos(ORG);
+  const repos = await getAllRepos(OWNER);
   console.log(`  Found ${repos.length} repos`);
 
   console.log('Finding or creating iPGM portfolio project...');
-  const projectId = await findOrCreateProject(ORG, orgId);
+  const projectId = await findOrCreateProject(OWNER, ownerId, isOrg);
 
   console.log('Ensuring iPGM custom fields...');
   const fieldMap = await ensureFields(projectId);
 
   console.log('Ensuring portfolio-report label in all repos...');
-  await ensurePortfolioLabel(ORG, repos);
+  await ensurePortfolioLabel(OWNER, repos);
 
   console.log('Loading existing project items...');
   const itemMap = await getAllItems(projectId);
 
-  console.log('Syncing program repos...');
+  console.log('Syncing repos to board...');
   let created = 0;
   let updated = 0;
   for (const repo of repos) {
     const isNew = await upsertRepo(projectId, fieldMap, itemMap, repo);
-    if (isNew) { created++; console.log(`  + Program added: ${repo.name}`); }
+    if (isNew) { created++; console.log(`  + Added: ${repo.name}`); }
     else        { updated++; }
   }
 
   console.log('Fetching flagged issues...');
-  const issues = await getFlaggedIssues(ORG);
+  const issues = await getFlaggedIssues(OWNER, isOrg);
   console.log(`  Found ${issues.length} issue(s) labelled "${LABEL_NAME}"`);
 
   console.log('Syncing flagged issues...');
@@ -519,8 +552,8 @@ async function main() {
 
   console.log(`
 Done.
-  Programs  -- created: ${created}, updated: ${updated}
-  Issues    -- added:   ${issuesAdded}
+  Repos   -- created: ${created}, updated: ${updated}
+  Issues  -- added:   ${issuesAdded}
 
 Board fields:
   Auto-synced : Language, Visibility, Stars, Repo URL
