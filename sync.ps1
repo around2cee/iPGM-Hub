@@ -411,13 +411,14 @@ function Sync-Repo($projectId, $fieldMap, [ref]$itemMap, $repo) {
     $itemId = $null
 
     if ($isNew) {
+        $repoBody = if ($repo.description) { $repo.description } else { "" }
         $result = Invoke-GQL @"
 mutation AddDraft(`$projectId: ID!, `$title: String!, `$body: String!) {
   addProjectV2DraftIssue(input: { projectId: `$projectId, title: `$title, body: `$body }) {
     projectItem { id }
   }
 }
-"@ @{ projectId = $projectId; title = $repo.name; body = if ($repo.description) { $repo.description } else { "" } }
+"@ @{ projectId = $projectId; title = $repo.name; body = $repoBody }
 
         $itemId = $result.addProjectV2DraftIssue.projectItem.id
         $itemMap.Value[$repo.name] = $itemId
@@ -567,5 +568,5 @@ Write-Host "Done."
 Write-Host "  Repos  -- created: $created, updated: $updated"
 Write-Host "  Issues -- added:   $issuesAdded"
 Write-Host ""
-Write-Host "Board: github.com/$OWNER?tab=projects"
+Write-Host "Board: https://bbgithub.dev.bloomberg.com/$OWNER?tab=projects"
 Write-Host ""
