@@ -24,7 +24,7 @@ if (-not $TOKEN -or -not $OWNER) {
     exit 1
 }
 
-$GQL_URL = "https://api.github.com/graphql"
+$GQL_URL = "https://bbgithub.dev.bloomberg.com/api/graphql"
 $HEADERS = @{
     Authorization = "Bearer $TOKEN"
     Accept        = "application/vnd.github+json"
@@ -56,7 +56,7 @@ function Invoke-GQL($query, $variables = @{}) {
 # ---------------------------------------------------------------------------
 
 function Invoke-GH($path, $method = "GET", $body = $null) {
-    $uri    = "https://api.github.com$path"
+    $uri    = "https://bbgithub.dev.bloomberg.com/api/v3$path"
     $params = @{ Uri = $uri; Method = $method; Headers = $HEADERS }
     if ($body) {
         $params.Body        = ($body | ConvertTo-Json -Depth 10)
@@ -240,7 +240,7 @@ $DESIRED_FIELDS = @(
     @{ name = "Repo URL";        dataType = "TEXT";          manual = $false }
 )
 
-function Ensure-Fields($projectId) {
+function Initialize-Fields($projectId) {
     $existing      = Get-ProjectFields $projectId
     $existingByName = @{}
     foreach ($f in $existing) { $existingByName[$f.name] = $f }
@@ -406,7 +406,7 @@ mutation UpdateField(`$projectId: ID!, `$itemId: ID!, `$fieldId: ID!, `$value: P
 # Upsert a repo as a draft issue on the board
 # ---------------------------------------------------------------------------
 
-function Upsert-Repo($projectId, $fieldMap, [ref]$itemMap, $repo) {
+function Sync-Repo($projectId, $fieldMap, [ref]$itemMap, $repo) {
     $isNew  = -not $itemMap.Value.ContainsKey($repo.name)
     $itemId = $null
 
@@ -426,7 +426,8 @@ mutation AddDraft(`$projectId: ID!, `$title: String!, `$body: String!) {
     }
 
     # Auto-sync metadata fields
-    Set-FieldValue $projectId $itemId $fieldMap["Language"]   ($repo.primaryLanguage.name ?? "")
+    $lang = if ($repo.primaryLanguage -and $repo.primaryLanguage.name) { $repo.primaryLanguage.name } else { "" }
+    Set-FieldValue $projectId $itemId $fieldMap["Language"]   $lang
     Set-FieldValue $projectId $itemId $fieldMap["Repo URL"]   $repo.url
     Set-FieldValue $projectId $itemId $fieldMap["Stars"]      $repo.stargazerCount
     Set-FieldValue $projectId $itemId $fieldMap["Visibility"] (if ($repo.isPrivate) { "Private" } else { "Public" })
@@ -444,7 +445,7 @@ mutation AddDraft(`$projectId: ID!, `$title: String!, `$body: String!) {
 # Ensure portfolio-report label exists in every repo
 # ---------------------------------------------------------------------------
 
-function Ensure-Label($owner, $repos) {
+function Initialize-Label($owner, $repos) {
     foreach ($repo in $repos) {
         $labels = Invoke-GH "/repos/$owner/$($repo.name)/labels"
         if (-not $labels) { continue }
@@ -536,10 +537,10 @@ Write-Host "Finding or creating iPGM portfolio project..."
 $projectId = Find-OrCreate-Project $OWNER $ownerId $isOrg
 
 Write-Host "Ensuring iPGM custom fields..."
-$fieldMap = Ensure-Fields $projectId
+$fieldMap = Initialize-Fields $projectId
 
 Write-Host "Ensuring portfolio-report label in all repos..."
-Ensure-Label $OWNER $repos
+Initialize-Label $OWNER $repos
 
 Write-Host "Loading existing project items..."
 $itemMap = Get-AllItems $projectId
@@ -548,7 +549,7 @@ Write-Host "Syncing repos to board..."
 $created = 0
 $updated = 0
 foreach ($repo in $repos) {
-    $isNew = Upsert-Repo $projectId $fieldMap ([ref]$itemMap) $repo
+    $isNew = Sync-Repo $projectId $fieldMap ([ref]$itemMap) $repo
     if ($isNew) { $created++; Write-Host "  + Added: $($repo.name)" }
     else        { $updated++ }
 }
