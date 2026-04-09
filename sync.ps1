@@ -535,6 +535,11 @@ Write-Host "Fetching all repos..."
 $repos = Get-AllRepos $OWNER
 Write-Host "  Found $($repos.Count) repos"
 
+# Repos to permanently exclude from the portfolio board
+$EXCLUDE_REPOS = @("iPGMtest")
+$repos = $repos | Where-Object { $EXCLUDE_REPOS -notcontains $_.name }
+Write-Host "  Syncing $($repos.Count) repos (excluded: $($EXCLUDE_REPOS -join ', '))"
+
 Write-Host "Finding or creating iPGM portfolio project..."
 $projectId = Find-OrCreate-Project $OWNER $ownerId $isOrg
 
