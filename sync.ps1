@@ -536,7 +536,7 @@ $repos = Get-AllRepos $OWNER
 Write-Host "  Found $($repos.Count) repos"
 
 # Repos to permanently exclude from the portfolio board
-$EXCLUDE_REPOS = @("iPGMtest")
+$EXCLUDE_REPOS = @("iPGMtest", "iPGM-Hub", "iPGM-project-template")
 $repos = $repos | Where-Object { $EXCLUDE_REPOS -notcontains $_.name }
 Write-Host "  Syncing $($repos.Count) repos (excluded: $($EXCLUDE_REPOS -join ', '))"
 
